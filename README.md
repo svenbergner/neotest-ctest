@@ -39,9 +39,8 @@
     - For `TEST_P`, only `Range`, `Values` and `Bool` parameter generators are supported. See
       [INSTANTIATE_TEST_SUITE_P](https://google.github.io/googletest/reference/testing.html#INSTANTIATE_TEST_SUITE_P)
       for more.
-  - [Catch2](https://github.com/catchorg/Catch2) (v3.3.0+): Supports macros `TEST_CASE`, `TEST_CASE_METHOD`, `SCENARIO`
-  - [doctest](https://github.com/doctest/doctest) (v2.4.8+): Supports macros `TEST_CASE`, `TEST_CASE_FIXTURE`,
-    `SCENARIO`
+  - [Catch2](https://github.com/catchorg/Catch2) (v3.3.0+): Supports macros `TEST_CASE`, `TEST_CASE_METHOD`, `SCENARIO`, 'SECTION'
+  - [doctest](https://github.com/doctest/doctest) (v2.4.8+): Supports macros `TEST_CASE`, `TEST_CASE_FIXTURE`, `SCENARIO`
     - Decorators not supported yet
   - [CppUTest](https://github.com/cpputest/cpputest) (from commit `f2016778dbf385b99d676f3f46e1153427112be1` and
     onwards): Supports macros `TEST`
@@ -54,8 +53,7 @@
 
 ## Limitations
 
-- Does not compile any source or tests ([cmake-tools](https://github.com/Civitasv/cmake-tools.nvim) is highly
-  recommended as a companion plugin).
+- Does not compile any source or tests ([cmake-tools](https://github.com/Civitasv/cmake-tools.nvim) is highly recommended as a companion plugin).
 - While CTest does not directly depend on the usage of CMake, this plugin assumes you have enumerated your tests with
   CMake integrations such as `gtest_discover_tests()`, `catch_discover_tests()`, etc.
 - `CTestTestfile.cmake` is expected to be on path from project root (max two levels deep)

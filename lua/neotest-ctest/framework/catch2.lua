@@ -15,6 +15,19 @@ catch2.include_query = [[
   )
 ]]
 catch2.tests_query = [[
+  ;; query - SECTION blocks nested inside test bodies (any depth)
+  (
+    (expression_statement
+      (call_expression
+        function: (identifier) @section.kind (#any-of? @section.kind "SECTION" "GIVEN" "WHEN" "THEN" "AND_GIVEN" "AND_WHEN" "AND_THEN")
+        arguments: (argument_list
+          . (string_literal (string_content) @section.name)
+          .
+        )
+      )
+    ) @section.statement
+    . (compound_statement) @section.body
+  )
   ;; query
   ((namespace_definition
     name: (namespace_identifier) @namespace.name
@@ -40,8 +53,9 @@ catch2.tests_query = [[
       ) @test.statement
       . (compound_statement) @test.body)
   ))
-  ;; query (tests without namespace)
-  (
+  ;; query (tests without namespace - anchored to translation_unit to avoid double-matching
+  ;; tests that are also inside a namespace)
+  (translation_unit
     (expression_statement
       (call_expression
         function: (identifier) @test.kind (#any-of? @test.kind "TEST_CASE" "TEST_CASE_METHOD" "SCENARIO")
@@ -105,6 +119,34 @@ function catch2.build_position(file_path, source, captured_nodes)
       name = name,
       range = definition,
     }
+  elseif captured_nodes["section.name"] then
+    local name = vim.treesitter.get_node_text(captured_nodes["section.name"], source)
+    local kind = vim.treesitter.get_node_text(captured_nodes["section.kind"], source)
+
+    -- Map BDD-style section keywords to readable prefixes
+    local prefix_map = {
+      GIVEN    = "Given: ",
+      WHEN     = "When: ",
+      THEN     = "Then: ",
+      AND_GIVEN = "And given: ",
+      AND_WHEN  = "And when: ",
+      AND_THEN  = "And then: ",
+    }
+    local prefix = prefix_map[kind]
+    if prefix then
+      name = prefix .. name
+    end
+
+    local statement = { captured_nodes["section.statement"]:range() }
+    local body = { captured_nodes["section.body"]:range() }
+    local definition = { statement[1], statement[2], body[3], body[4] }
+
+    position = {
+      type = "test",
+      path = file_path,
+      name = name,
+      range = definition,
+    }
   end
 
   return position
@@ -112,7 +154,11 @@ end
 
 function catch2.parse_positions(path)
   local lib = require("neotest.lib")
-  local opts = { build_position = "require('neotest-ctest.framework.catch2').build_position" }
+  local opts = {
+    build_position = "require('neotest-ctest.framework.catch2').build_position",
+    -- Allow SECTION blocks (type="test") to be nested inside TEST_CASE (type="test")
+    nested_tests = true,
+  }
   return lib.treesitter.parse_positions(path, catch2.tests_query, opts)
 end
 
