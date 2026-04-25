@@ -237,9 +237,19 @@ function adapter.build_spec(args)
         request = "launch",
         name = "Debug CTest",
         program = dap_test.executable,
-        args = dap_test.args,
-        cwd = root,
+        args = vim.list_extend(vim.list_slice(dap_test.args or {}), section_args),
+        cwd = dap_test.working_dir or root,
         stopAtEntry = false,
+        -- codelldb uses `env` (flat table); cppdbg uses `environment` (array of {name,value})
+        env = next(dap_test.env or {}) ~= nil and dap_test.env or nil,
+        environment = (function()
+          if not next(dap_test.env or {}) then return nil end
+          local list = {}
+          for k, v in pairs(dap_test.env) do
+            table.insert(list, { name = k, value = v })
+          end
+          return list
+        end)(),
       },
       context = {
         ctest = ctest,
