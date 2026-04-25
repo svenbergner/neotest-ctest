@@ -54,6 +54,12 @@ local default_config = {
   -- DAP adapter name to use for debugging (e.g. "codelldb", "cppdbg").
   -- Set to nil to disable debug support.
   dap_adapter = nil,
+  -- Extra fields merged into the DAP strategy table.
+  -- Useful for adapter-specific options, e.g. for codelldb on macOS with Catch2:
+  --   dap_args = { stopOnEntry = false }
+  -- To suppress Catch2 internal exception breakpoints, configure nvim-dap directly:
+  --   require('dap').defaults.codelldb = { exception_breakpoints = {} }
+  dap_args = {},
 }
 
 local config = default_config
