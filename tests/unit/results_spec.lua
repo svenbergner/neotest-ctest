@@ -315,7 +315,12 @@ describe("position.type == test with nested SECTION children (Catch2)", function
     assert.equals("passed", results[s2_id].status)
   end)
 
-  it("SECTION children inherit 'failed' status from parent TEST_CASE (CTest path)", function()
+  it("only the SECTION containing the failing line is marked 'failed', others 'skipped' (CTest path)", function()
+    -- "First section" range is {5,2,7,3} (0-indexed lines 5-7).
+    -- Error on source line 7 (1-indexed) → adjusted_line = 6 → within range [5,7].
+    spec.context.framework.parse_errors = function(_)
+      return { { line = 7, message = "CHECK failed" } }
+    end
     spec.context.ctest.parse_test_results = function()
       return {
         ["With sections"] = { status = "fail", time = 0.1, output = "error output" },
@@ -328,7 +333,25 @@ describe("position.type == test with nested SECTION children (Catch2)", function
     local s2_id = tc_id .. "::" .. "Second section"
     assert.equals("failed", results[tc_id].status)
     assert.equals("failed", results[s1_id].status)
-    assert.equals("failed", results[s2_id].status)
+    assert.equals("skipped", results[s2_id].status)
+    assert.equals(1, #results[s1_id].errors)
+    assert.equals(6, results[s1_id].errors[1].line) -- 0-indexed: 7 - 1 = 6
+  end)
+
+  it("all SECTIONs are 'skipped' when no error lines can be attributed to them (CTest path)", function()
+    spec.context.ctest.parse_test_results = function()
+      return {
+        ["With sections"] = { status = "fail", time = 0.1, output = "error output" },
+        summary = { tests = 1, failures = 1, skipped = 0, time = 0.1, output = "" },
+      }
+    end
+    local results = adapter.results(spec, nil, tree)
+    local tc_id = test_file .. "::" .. "With sections"
+    local s1_id = tc_id .. "::" .. "First section"
+    local s2_id = tc_id .. "::" .. "Second section"
+    assert.equals("failed", results[tc_id].status)
+    assert.equals("skipped", results[s1_id].status)
+    assert.equals("skipped", results[s2_id].status)
   end)
 
   it("selected SECTION gets 'passed' via catch2_direct path", function()

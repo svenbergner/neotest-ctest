@@ -297,6 +297,7 @@ local function prepare_results(tree, testsuite, framework, context)
     -- When running directly (catch2_direct), Catch2 JUnit uses "TestCase/Section" as the
     -- <testcase name>, so look up by the pre-computed section_junit_key first.
     local testcase = testsuite[node.name]
+    local using_section_fallback = false
     if not testcase and context then
       if context.catch2_direct and context.section_junit_key then
         testcase = testsuite[context.section_junit_key]
@@ -305,6 +306,7 @@ local function prepare_results(tree, testsuite, framework, context)
         local parent_name = context.section_to_ctest[node.id]
         if parent_name then
           testcase = testsuite[parent_name]
+          using_section_fallback = true
         end
       end
     end
@@ -322,17 +324,39 @@ local function prepare_results(tree, testsuite, framework, context)
       elseif testcase.status == "fail" then
         local errors = framework.parse_errors(testcase.output)
 
-        -- NOTE: Neotest adds 1 for some reason.
-        for _, error in pairs(errors) do
-          error.line = error.line - 1
+        if using_section_fallback then
+          -- When inheriting from the parent CTest result, only mark this SECTION as failed
+          -- if at least one error's line falls within its source range. This prevents all
+          -- sibling SECTIONs from being marked failed when only one actually failed.
+          local section_errors = {}
+          for _, error in ipairs(errors) do
+            local adjusted_line = error.line - 1 -- convert to 0-indexed (neotest adds 1)
+            if node.range[1] <= adjusted_line and adjusted_line <= node.range[3] then
+              table.insert(section_errors, { line = adjusted_line, message = error.message })
+            end
+          end
+          if #section_errors > 0 then
+            results[node.id] = {
+              status = "failed",
+              short = testcase.output,
+              output = testsuite.summary.output,
+              errors = section_errors,
+            }
+          else
+            results[node.id] = { status = "skipped" }
+          end
+        else
+          -- NOTE: Neotest adds 1 for some reason.
+          for _, error in pairs(errors) do
+            error.line = error.line - 1
+          end
+          results[node.id] = {
+            status = "failed",
+            short = testcase.output,
+            output = testsuite.summary.output,
+            errors = errors,
+          }
         end
-
-        results[node.id] = {
-          status = "failed",
-          short = testcase.output,
-          output = testsuite.summary.output,
-          errors = errors,
-        }
       else
         results[node.id] = { status = "skipped" }
       end
