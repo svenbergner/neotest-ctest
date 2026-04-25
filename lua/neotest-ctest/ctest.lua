@@ -1,5 +1,6 @@
 local config = require("neotest-ctest.config")
 local lib = require("neotest.lib")
+local logger = require("neotest.logging")
 local nio = require("nio")
 
 local ctest = {}
@@ -64,10 +65,9 @@ function ctest:command(args)
     self._output_junit_path,
     "--output-log",
     self._output_log_path,
-    table.concat(args, " "),
   }
-
-  return table.concat(command, " ")
+  vim.list_extend(command, args)
+  return command
 end
 
 function ctest:testcases()
@@ -81,10 +81,48 @@ function ctest:testcases()
 
     for index, test in ipairs(decoded.tests) do
       local cmd = test.command or {}
+      local env = {}
+      local working_dir = nil
+
+      for _, prop in ipairs(test.properties or {}) do
+        if prop.name == "ENVIRONMENT_MODIFICATION" then
+          -- value is an array of "VAR=operation:path" strings (CTest 3.22+)
+          local mods = type(prop.value) == "table" and prop.value or { prop.value }
+          for _, entry in ipairs(mods) do
+            -- e.g. "DYLD_FRAMEWORK_PATH=path_list_prepend:/path/to/lib"
+            local var, op, val = entry:match("^([^=]+)=([^:]+):(.+)$")
+            if var and val then
+              if op == "path_list_prepend" then
+                local existing = os.getenv(var)
+                env[var] = existing and (val .. ":" .. existing) or val
+              elseif op == "path_list_append" then
+                local existing = os.getenv(var)
+                env[var] = existing and (existing .. ":" .. val) or val
+              else -- "set", "unset", "string_prepend", etc.
+                env[var] = val
+              end
+            end
+          end
+        elseif prop.name == "ENVIRONMENT" then
+          -- simple "VAR=VALUE" list
+          local entries = type(prop.value) == "table" and prop.value or { prop.value }
+          for _, entry in ipairs(entries) do
+            local var, val = entry:match("^([^=]+)=(.*)$")
+            if var then
+              env[var] = val or ""
+            end
+          end
+        elseif prop.name == "WORKING_DIRECTORY" then
+          working_dir = prop.value
+        end
+      end
+
       testcases[test.name] = {
         index = index,
         executable = cmd[1],
         args = vim.list_slice(cmd, 2),
+        env = env,
+        working_dir = working_dir,
       }
     end
   else
@@ -94,7 +132,101 @@ function ctest:testcases()
   return testcases
 end
 
+-- Parse Catch2 JUnit output produced by running the test executable directly
+-- (i.e. without CTest) with `--reporter junit --out <path>`.
+-- Catch2 JUnit has <testsuites> as root (vs CTest's <testsuite>), and uses
+-- a <failure> child element to signal failures instead of status="fail".
+function ctest:parse_catch2_direct_results()
+  if vim.fn.filereadable(self._output_junit_path) == 0 then
+    logger.error(
+      "neotest-ctest: Catch2 JUnit output file not found: " .. tostring(self._output_junit_path)
+    )
+    return { summary = { tests = 0, failures = 0, skipped = 0, time = 0, output = "" } }
+  end
+
+  local junit_data = lib.files.read(self._output_junit_path)
+
+  -- Catch2 may leave '>' unescaped in XML attribute values (e.g. section names that
+  -- contain HTML like "<a href>").  neotest's xml2lua parser uses `[^>]-` to match
+  -- tag content, so an unescaped '>' inside a quoted attribute value breaks parsing.
+  -- Pre-process: escape literal '>' inside double-quoted attribute values.
+  junit_data = junit_data:gsub('="([^"]*)"', function(val)
+    return '="' .. val:gsub(">", "&gt;") .. '"'
+  end)
+
+  local junit = lib.xml.parse(junit_data)
+
+  -- Catch2's JUnit reporter wraps everything in <testsuites><testsuite>
+  local testsuite = junit.testsuites and junit.testsuites.testsuite or junit.testsuite
+
+  if not testsuite then
+    logger.error("neotest-ctest: Could not locate <testsuite> in Catch2 JUnit output")
+    return { summary = { tests = 0, failures = 0, skipped = 0, time = 0, output = "" } }
+  end
+
+  local tests_count = tonumber(testsuite._attr.tests) or 0
+
+  if not testsuite.testcase then
+    logger.warn("neotest-ctest: Catch2 JUnit output contains no testcase elements")
+    return { summary = { tests = 0, failures = 0, skipped = 0, time = 0, output = "" } }
+  end
+
+  -- lib.xml.parse returns a plain table (with _attr) for a single element, or a
+  -- numeric array for multiple elements.  Catch2's <testsuite tests="N"> uses N =
+  -- assertion count, not testcase count, so we cannot rely on tests_count < 2.
+  local raw = testsuite.testcase._attr and { testsuite.testcase } or testsuite.testcase
+
+  local results = {}
+  local total_time = 0
+
+  for _, testcase in pairs(raw) do
+    local name = testcase._attr.name
+    local time = tonumber(testcase._attr.time) or 0
+    total_time = total_time + time
+
+    local status, output
+    if testcase.failure then
+      status = "fail"
+      local fail = testcase.failure
+      -- failure may be a single element or a list
+      if type(fail) == "table" and fail._attr then
+        output = fail._attr.message or ""
+      elseif type(fail) == "string" then
+        output = fail
+      else
+        output = ""
+      end
+    else
+      status = "run"
+      output = testcase["system-out"] or ""
+    end
+
+    results[name] = { status = status, time = time, output = output }
+  end
+
+  results.summary = {
+    tests = tests_count,
+    failures = tonumber(testsuite._attr.failures) or 0,
+    skipped = tonumber(testsuite._attr.skipped) or 0,
+    time = total_time,
+    output = self._output_junit_path,
+  }
+
+  return results
+end
+
 function ctest:parse_test_results()
+  -- Guard: if CTest failed to produce the JUnit output file (e.g. command error,
+  -- invalid args, or no tests ran), return an empty result set instead of crashing.
+  if vim.fn.filereadable(self._output_junit_path) == 0 then
+    logger.error(
+      "neotest-ctest: JUnit output file not found: " .. tostring(self._output_junit_path)
+        .. ". CTest may have failed to run. Check the output log: "
+        .. tostring(self._output_log_path)
+    )
+    return { summary = { tests = 0, failures = 0, skipped = 0, time = 0, output = self._output_log_path } }
+  end
+
   local junit_data = lib.files.read(self._output_junit_path)
   local junit = lib.xml.parse(junit_data)
   local testsuite = junit.testsuite

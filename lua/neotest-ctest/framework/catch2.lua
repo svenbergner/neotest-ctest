@@ -120,7 +120,7 @@ function catch2.build_position(file_path, source, captured_nodes)
       range = definition,
     }
   elseif captured_nodes["section.name"] then
-    local name = vim.treesitter.get_node_text(captured_nodes["section.name"], source)
+    local raw_name = vim.treesitter.get_node_text(captured_nodes["section.name"], source)
     local kind = vim.treesitter.get_node_text(captured_nodes["section.kind"], source)
 
     -- Map BDD-style section keywords to readable prefixes
@@ -133,9 +133,7 @@ function catch2.build_position(file_path, source, captured_nodes)
       AND_THEN  = "And then: ",
     }
     local prefix = prefix_map[kind]
-    if prefix then
-      name = prefix .. name
-    end
+    local display_name = prefix and (prefix .. raw_name) or raw_name
 
     local statement = { captured_nodes["section.statement"]:range() }
     local body = { captured_nodes["section.body"]:range() }
@@ -144,7 +142,9 @@ function catch2.build_position(file_path, source, captured_nodes)
     position = {
       type = "test",
       path = file_path,
-      name = name,
+      name = display_name,
+      -- Raw section name (without display prefix) used as Catch2 -c filter argument
+      section_filter = raw_name,
       range = definition,
     }
   end

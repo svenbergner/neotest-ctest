@@ -241,6 +241,179 @@ describe("position.type == namespace", function()
   end)
 end)
 
+describe("position.type == test with nested SECTION children (Catch2)", function()
+  local spec, test_file, positions, tree
+
+  before_each(function()
+    test_file = "TEST_CASE_SECTION_test.cpp"
+    -- Tree: TEST_CASE "With sections" -> SECTION "First section", SECTION "Second section"
+    positions = {
+      {
+        id = test_file .. "::" .. "With sections",
+        name = "With sections",
+        path = test_file,
+        range = { 4, 0, 11, 1 },
+        type = "test",
+      },
+      {
+        {
+          id = test_file .. "::" .. "With sections" .. "::" .. "First section",
+          name = "First section",
+          path = test_file,
+          range = { 5, 2, 7, 3 },
+          type = "test",
+          section_filter = "First section",
+        },
+      },
+      {
+        {
+          id = test_file .. "::" .. "With sections" .. "::" .. "Second section",
+          name = "Second section",
+          path = test_file,
+          range = { 8, 2, 10, 3 },
+          type = "test",
+          section_filter = "Second section",
+        },
+      },
+    }
+    tree = Tree.from_list(positions, function(pos)
+      return pos.id
+    end)
+    spec = {
+      context = {
+        ctest = {
+          parse_test_results = function()
+            return {}
+          end,
+        },
+        framework = {
+          parse_errors = function(_)
+            return {}
+          end,
+        },
+        section_to_ctest = {
+          [test_file .. "::" .. "With sections" .. "::" .. "First section"] = "With sections",
+          [test_file .. "::" .. "With sections" .. "::" .. "Second section"] = "With sections",
+        },
+      },
+    }
+  end)
+
+  it("SECTION children inherit 'passed' status from parent TEST_CASE (CTest path)", function()
+    spec.context.ctest.parse_test_results = function()
+      return {
+        ["With sections"] = { status = "run", time = 0.1, output = "" },
+        summary = { tests = 1, failures = 0, skipped = 0, time = 0.1, output = "" },
+      }
+    end
+    local results = adapter.results(spec, nil, tree)
+    local tc_id = test_file .. "::" .. "With sections"
+    local s1_id = tc_id .. "::" .. "First section"
+    local s2_id = tc_id .. "::" .. "Second section"
+    assert.equals("passed", results[tc_id].status)
+    assert.equals("passed", results[s1_id].status)
+    assert.equals("passed", results[s2_id].status)
+  end)
+
+  it("SECTION children inherit 'failed' status from parent TEST_CASE (CTest path)", function()
+    spec.context.ctest.parse_test_results = function()
+      return {
+        ["With sections"] = { status = "fail", time = 0.1, output = "error output" },
+        summary = { tests = 1, failures = 1, skipped = 0, time = 0.1, output = "" },
+      }
+    end
+    local results = adapter.results(spec, nil, tree)
+    local tc_id = test_file .. "::" .. "With sections"
+    local s1_id = tc_id .. "::" .. "First section"
+    local s2_id = tc_id .. "::" .. "Second section"
+    assert.equals("failed", results[tc_id].status)
+    assert.equals("failed", results[s1_id].status)
+    assert.equals("failed", results[s2_id].status)
+  end)
+
+  it("selected SECTION gets 'passed' via catch2_direct path", function()
+    local s1_id = test_file .. "::" .. "With sections" .. "::" .. "First section"
+    -- Tree is rooted at the single selected SECTION
+    local section_tree = Tree.from_list(
+      { {
+        id = s1_id,
+        name = "First section",
+        path = test_file,
+        range = { 5, 2, 7, 3 },
+        type = "test",
+        section_filter = "First section",
+      } },
+      function(pos)
+        return pos.id
+      end
+    )
+    -- Catch2 JUnit uses "TestCase/Section" as the <testcase name> attribute.
+    local junit_key = "With sections/First section"
+    local section_spec = {
+      context = {
+        catch2_direct = true,
+        section_junit_key = junit_key,
+        ctest = {
+          parse_catch2_direct_results = function()
+            return {
+              [junit_key] = { status = "run", time = 0.05, output = "" },
+              summary = { tests = 1, failures = 0, skipped = 0, time = 0.05, output = "" },
+            }
+          end,
+        },
+        framework = {
+          parse_errors = function(_)
+            return {}
+          end,
+        },
+        section_to_ctest = { [s1_id] = "With sections" },
+      },
+    }
+    local results = adapter.results(section_spec, nil, section_tree)
+    assert.equals("passed", results[s1_id].status)
+  end)
+
+  it("selected SECTION gets 'failed' via catch2_direct path", function()
+    local s1_id = test_file .. "::" .. "With sections" .. "::" .. "First section"
+    local section_tree = Tree.from_list(
+      { {
+        id = s1_id,
+        name = "First section",
+        path = test_file,
+        range = { 5, 2, 7, 3 },
+        type = "test",
+        section_filter = "First section",
+      } },
+      function(pos)
+        return pos.id
+      end
+    )
+    local junit_key = "With sections/First section"
+    local section_spec = {
+      context = {
+        catch2_direct = true,
+        section_junit_key = junit_key,
+        ctest = {
+          parse_catch2_direct_results = function()
+            return {
+              [junit_key] = { status = "fail", time = 0.05, output = "assertion failed" },
+              summary = { tests = 1, failures = 1, skipped = 0, time = 0.05, output = "" },
+            }
+          end,
+        },
+        framework = {
+          parse_errors = function(_)
+            return {}
+          end,
+        },
+        section_to_ctest = { [s1_id] = "With sections" },
+      },
+    }
+    local results = adapter.results(section_spec, nil, section_tree)
+    assert.equals("failed", results[s1_id].status)
+  end)
+end)
+
 describe("position.type == file", function()
   local spec, test_file, positions, tree, namespace
 
