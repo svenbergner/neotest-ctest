@@ -75,7 +75,7 @@ function ctest:testcases()
 
   local output = self:run({ "--show-only=json-v1" })
 
-  if output then
+  if output and #output > 0 then
     output = string.gsub(output, "[\n\r]", "")
     local decoded = vim.json.decode(output)
 
@@ -126,7 +126,7 @@ function ctest:testcases()
       }
     end
   else
-    -- TODO: log error?
+    logger.warn("neotest-ctest: ctest --show-only=json-v1 returned empty output from " .. tostring(self._test_dir))
   end
 
   return testcases
@@ -146,12 +146,12 @@ function ctest:parse_catch2_direct_results()
 
   local junit_data = lib.files.read(self._output_junit_path)
 
-  -- Catch2 may leave '>' unescaped in XML attribute values (e.g. section names that
-  -- contain HTML like "<a href>").  neotest's xml2lua parser uses `[^>]-` to match
-  -- tag content, so an unescaped '>' inside a quoted attribute value breaks parsing.
-  -- Pre-process: escape literal '>' inside double-quoted attribute values.
+  -- Catch2 may leave '<' and '>' unescaped in XML attribute values (e.g. section names
+  -- that contain HTML tags like "<b>-Tags").  neotest's xml2lua parser uses `[^>]-` to
+  -- match tag content, so unescaped '<' or '>' inside a quoted attribute value breaks
+  -- parsing.  Pre-process: escape literal '<' and '>' inside double-quoted attribute values.
   junit_data = junit_data:gsub('="([^"]*)"', function(val)
-    return '="' .. val:gsub(">", "&gt;") .. '"'
+    return '="' .. val:gsub("<", "&lt;"):gsub(">", "&gt;") .. '"'
   end)
 
   local junit = lib.xml.parse(junit_data)

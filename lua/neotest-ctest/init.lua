@@ -107,6 +107,24 @@ function adapter.build_spec(args)
       end
     end
 
+    -- Fallback: range-containment search failed (e.g. file changed or testcases is empty).
+    -- Traverse the neotest position tree via the shared _nodes map to find the CTest ancestor.
+    if not ctest_ancestor then
+      local parent_node = tree:get_key(position.id)
+      parent_node = parent_node and parent_node:parent()
+      while parent_node do
+        local pdata = parent_node:data()
+        if pdata.type == "test" and testcases[pdata.name] then
+          logger.debug(
+            "neotest-ctest: SECTION — found CTest ancestor via tree traversal: " .. pdata.name
+          )
+          ctest_ancestor = pdata
+          break
+        end
+        parent_node = parent_node:parent()
+      end
+    end
+
     if ctest_ancestor then
       logger.debug("neotest-ctest: SECTION — found CTest ancestor: " .. ctest_ancestor.name)
       table.insert(runnable_tests, testcases[ctest_ancestor.name])
@@ -375,12 +393,43 @@ local function prepare_results(tree, testsuite, framework, context)
   return results
 end
 
+local function worst_status(a, b)
+  if a == "failed" or b == "failed" then
+    return "failed"
+  elseif a == "passed" or b == "passed" then
+    return "passed"
+  end
+  return "skipped"
+end
+
 function adapter.results(spec, _, tree)
   local context = spec.context
   local testsuite = context.catch2_direct
     and context.ctest:parse_catch2_direct_results()
     or context.ctest:parse_test_results()
-  return prepare_results(tree, testsuite, context.framework, context)
+  local results = prepare_results(tree, testsuite, context.framework, context)
+
+  -- When running a single test, prepare_results only covers the subtree rooted at
+  -- that test node. Neotest's runner propagates results only within the subtree, so
+  -- ancestor nodes (namespace, file) keep stale results from previous runs (e.g.
+  -- parent stays "failed" after a test is fixed and re-runs as "passed").
+  -- Fix: compute the worst status across all results from this run and walk up
+  -- tree:parent() to set an explicit result for each ancestor not already covered.
+  local status = "skipped"
+  for _, v in pairs(results) do
+    status = worst_status(status, v.status)
+  end
+
+  local parent = tree:parent()
+  while parent do
+    local pdata = parent:data()
+    if (pdata.type == "file" or pdata.type == "namespace") and not results[pdata.id] then
+      results[pdata.id] = { status = status, output = testsuite.summary.output }
+    end
+    parent = parent:parent()
+  end
+
+  return results
 end
 
 return adapter
