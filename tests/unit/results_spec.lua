@@ -100,13 +100,13 @@ describe("position.type == test", function()
     assert.equals("skipped", results[test_file .. "::Suite.First"].status)
   end)
 
-  it("adapter.results should set status as 'skipped' given an unknown test", function()
+  it("adapter.results should not overwrite status given an unknown test", function()
     -- NOTE: Unknown as in "not known to CTest" (i.e. not compiled yet)
     spec.context.ctest.parse_test_results = function()
       return {}
     end
     local results = adapter.results(spec, nil, tree)
-    assert.equals("skipped", results[test_file .. "::Suite.First"].status)
+    assert.is_nil(results[test_file .. "::Suite.First"])
   end)
 end)
 
@@ -315,7 +315,55 @@ describe("position.type == test with nested SECTION children (Catch2)", function
     assert.equals("passed", results[s2_id].status)
   end)
 
-  it("only the SECTION containing the failing line is marked 'failed', others 'skipped' (CTest path)", function()
+  it("SECTION children inherit 'passed' status from the single JUnit result when names differ", function()
+    spec.context.ctest.parse_test_results = function()
+      return {
+        ["CTest generated name"] = { status = "passed", time = 0.1, output = "" },
+        summary = { tests = 1, failures = 0, skipped = 0, time = 0.1, output = "" },
+      }
+    end
+    local results = adapter.results(spec, nil, tree)
+    local tc_id = test_file .. "::" .. "With sections"
+    local s1_id = tc_id .. "::" .. "First section"
+    local s2_id = tc_id .. "::" .. "Second section"
+    assert.equals("passed", results[tc_id].status)
+    assert.equals("passed", results[s1_id].status)
+    assert.equals("passed", results[s2_id].status)
+  end)
+
+  it("SECTION children are marked passed when CTest only reports the selected parent TEST_CASE", function()
+    spec.context.framework.parse_positions = function(_)
+      return tree
+    end
+    spec.context.ctest.parse_test_results = function()
+      return {
+        ["With sections"] = { status = "run", time = 0.1, output = "" },
+        summary = { tests = 1, failures = 0, skipped = 0, time = 0.1, output = "" },
+      }
+    end
+
+    local tc_id = test_file .. "::" .. "With sections"
+    local parent_only_tree = Tree.from_list({
+      {
+        id = tc_id,
+        name = "With sections",
+        path = test_file,
+        range = { 4, 0, 11, 1 },
+        type = "test",
+      },
+    }, function(pos)
+      return pos.id
+    end)
+
+    local results = adapter.results(spec, nil, parent_only_tree)
+    local s1_id = tc_id .. "::" .. "First section"
+    local s2_id = tc_id .. "::" .. "Second section"
+    assert.equals("passed", results[tc_id].status)
+    assert.equals("passed", results[s1_id].status)
+    assert.equals("passed", results[s2_id].status)
+  end)
+
+  it("only the SECTION containing the failing line is marked 'failed', others 'passed' (CTest path)", function()
     -- "First section" range is {5,2,7,3} (0-indexed lines 5-7).
     -- Error on source line 7 (1-indexed) → adjusted_line = 6 → within range [5,7].
     spec.context.framework.parse_errors = function(_)
@@ -333,12 +381,12 @@ describe("position.type == test with nested SECTION children (Catch2)", function
     local s2_id = tc_id .. "::" .. "Second section"
     assert.equals("failed", results[tc_id].status)
     assert.equals("failed", results[s1_id].status)
-    assert.equals("skipped", results[s2_id].status)
+    assert.equals("passed", results[s2_id].status)
     assert.equals(1, #results[s1_id].errors)
     assert.equals(6, results[s1_id].errors[1].line) -- 0-indexed: 7 - 1 = 6
   end)
 
-  it("all SECTIONs are 'skipped' when no error lines can be attributed to them (CTest path)", function()
+  it("SECTION children keep their previous status when no error lines can be parsed (CTest path)", function()
     spec.context.ctest.parse_test_results = function()
       return {
         ["With sections"] = { status = "fail", time = 0.1, output = "error output" },
@@ -350,8 +398,8 @@ describe("position.type == test with nested SECTION children (Catch2)", function
     local s1_id = tc_id .. "::" .. "First section"
     local s2_id = tc_id .. "::" .. "Second section"
     assert.equals("failed", results[tc_id].status)
-    assert.equals("skipped", results[s1_id].status)
-    assert.equals("skipped", results[s2_id].status)
+    assert.is_nil(results[s1_id])
+    assert.is_nil(results[s2_id])
   end)
 
   it("selected SECTION gets 'passed' via catch2_direct path", function()
@@ -574,6 +622,53 @@ describe("position.type == file", function()
     end
     local results = adapter.results(spec, nil, tree)
     assert.equals("skipped", results[test_file].status)
+  end)
+
+  it("adapter.results should not mark a branch as skipped when no tests have results", function()
+    spec.context.ctest.parse_test_results = function()
+      return {
+        summary = {
+          tests = 0,
+          failures = 0,
+          skipped = 0,
+          time = 0,
+          output = "",
+        },
+      }
+    end
+
+    local results = adapter.results(spec, nil, tree)
+
+    assert.is_nil(results[test_file .. "::" .. namespace .. "::" .. "Suite.First"])
+    assert.is_nil(results[test_file .. "::" .. namespace])
+    assert.is_nil(results[test_file .. "::" .. "Suite.Second"])
+    assert.is_nil(results[test_file])
+  end)
+
+  it("adapter.results should not mark ancestors as skipped when a single selected test is skipped", function()
+    spec.context.ctest.parse_test_results = function()
+      return {
+        ["Suite.First"] = {
+          status = "skipped",
+          time = 0,
+          output = "",
+        },
+        summary = {
+          tests = 1,
+          failures = 0,
+          skipped = 1,
+          time = 0,
+          output = "",
+        },
+      }
+    end
+
+    local test_id = test_file .. "::" .. namespace .. "::" .. "Suite.First"
+    local results = adapter.results(spec, nil, tree:get_key(test_id))
+
+    assert.equals("skipped", results[test_id].status)
+    assert.is_nil(results[test_file .. "::" .. namespace])
+    assert.is_nil(results[test_file])
   end)
 
   describe("contains a namespace with passing tests and a failing non-namespaced test", function()

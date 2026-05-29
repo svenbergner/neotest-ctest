@@ -6,6 +6,9 @@ local user_config = {
   root = function(_)
     return true
   end,
+  ctest_root = function(root, _)
+    return root
+  end,
   is_test_file = function(_)
     -- All files are reported as test files
     return true
@@ -25,6 +28,7 @@ describe("adapter.setup", function()
     local expected_config = user_config
     local actual_config = config.get()
     assert.are.same(expected_config.root, actual_config.root)
+    assert.are.same(expected_config.ctest_root, actual_config.ctest_root)
     assert.are.same(expected_config.is_test_file, actual_config.is_test_file)
     assert.are.same(expected_config.filter_dir, actual_config.filter_dir)
     assert.are.same(expected_config.frameworks, actual_config.frameworks)

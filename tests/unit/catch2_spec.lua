@@ -303,4 +303,27 @@ assertions: 2 | 2 failed
 
     assert.are.same(expected_errors, actual_errors)
   end)
+
+  it("parses diagnostics without the summary separator", function()
+    local output = [[
+-------------------------------------------------------------------------------
+Second
+-------------------------------------------------------------------------------
+/path/to/TEST_CASE_test.cpp:5
+...............................................................................
+
+/path/to/TEST_CASE_test.cpp:6: FAILED:
+  CHECK( false )
+]]
+
+    local actual_errors = catch2.parse_errors(output)
+    local expected_errors = {
+      {
+        line = 6,
+        message = "  CHECK( false )",
+      },
+    }
+
+    assert.are.same(expected_errors, actual_errors)
+  end)
 end)
