@@ -7,12 +7,40 @@ local ctest = {}
 
 function ctest:run(args)
   local cmd = { unpack(config.cmd), "--test-dir", self._test_dir, unpack(args) }
-  local _, result = lib.process.run(cmd, { stdout = true, stderr = true })
+  local stdout
+  local stderr = ""
+  local code = 0
 
-  return result.stdout
+  if nio.current_task() then
+    local result
+    code, result = lib.process.run(cmd, { stdout = true, stderr = true })
+    stdout = result.stdout or ""
+    stderr = result.stderr or ""
+  elseif vim.system and not vim.in_fast_event() then
+    local result = vim.system(cmd, { text = true }):wait()
+    stdout = result.stdout or ""
+    stderr = result.stderr or ""
+    code = result.code
+  elseif vim.in_fast_event() then
+    error("neotest-ctest: ctest command cannot be run synchronously in a fast event context")
+  else
+    stdout = vim.fn.system(cmd)
+    code = vim.v.shell_error
+  end
+
+  if code ~= 0 then
+    logger.warn(
+      "neotest-ctest: ctest command failed with code "
+        .. tostring(code)
+        .. ": "
+        .. table.concat(cmd, " ")
+    )
+  end
+
+  return stdout
 end
 
-function ctest:new(cwd)
+function ctest:test_dirs(cwd)
   local scandir = require("plenary.scandir")
 
   local ctest_roots = scandir.scan_dir(cwd, {
@@ -22,13 +50,28 @@ function ctest:new(cwd)
     silent = true,
   })
 
-  local test_dir = next(ctest_roots) and lib.files.parent(ctest_roots[1]) or nil
+  local test_dirs = vim.tbl_map(function(path)
+    return lib.files.parent(path)
+  end, ctest_roots)
+
+  return test_dirs
+end
+
+function ctest:new(cwd, test_dir)
+  local test_dirs = test_dir and { test_dir } or self:test_dirs(cwd)
+  test_dir = test_dirs[1]
 
   if not test_dir then
     error("Failed to locate CTest test directory")
   end
 
-  local version = self:run({ "--version" })
+  local session = {
+    _test_dir = test_dir,
+  }
+  setmetatable(session, self)
+  self.__index = self
+
+  local version = session:run({ "--version" })
 
   if not version then
     error("Failed to determine CTest version")
@@ -43,13 +86,8 @@ function ctest:new(cwd)
   local output_junit_path = nio.fn.tempname()
   local output_log_path = nio.fn.tempname()
 
-  local session = {
-    _test_dir = test_dir,
-    _output_junit_path = output_junit_path,
-    _output_log_path = output_log_path,
-  }
-  setmetatable(session, self)
-  self.__index = self
+  session._output_junit_path = output_junit_path
+  session._output_log_path = output_log_path
   return session
 end
 
@@ -77,7 +115,10 @@ function ctest:testcases()
 
   if output and #output > 0 then
     output = string.gsub(output, "[\n\r]", "")
-    local decoded = vim.json.decode(output)
+    local ok, decoded = pcall(vim.json.decode, output)
+    if not ok then
+      error(decoded)
+    end
 
     for index, test in ipairs(decoded.tests) do
       local cmd = test.command or {}

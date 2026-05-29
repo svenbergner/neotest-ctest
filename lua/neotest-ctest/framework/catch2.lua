@@ -1,4 +1,3 @@
-local logger = require("neotest.logging")
 local catch2 = {}
 
 catch2.lang = "cpp"
@@ -15,6 +14,21 @@ catch2.include_query = [[
   )
 ]]
 catch2.tests_query = [[
+  ;; query - TEST_CASE / TEST_CASE_METHOD / SCENARIO blocks anywhere in a file.
+  (
+    (expression_statement
+      (call_expression
+        function: (identifier) @test.kind (#any-of? @test.kind "TEST_CASE" "TEST_CASE_METHOD" "SCENARIO")
+        arguments: (argument_list
+          . (identifier) ? @test.fixture
+          . (string_literal (string_content) @test.name )
+          . (string_literal (string_content) @test.tag ) ?
+          .
+        )
+      )
+    ) @test.statement
+    . (compound_statement) @test.body
+  )
   ;; query - SECTION blocks nested inside test bodies (any depth)
   (
     (expression_statement
@@ -32,51 +46,14 @@ catch2.tests_query = [[
   ((namespace_definition
     name: (namespace_identifier) @namespace.name
   )) @namespace.definition
-  ;; query (tests within namespace)
-  ;; NOTE: There seem to be some limitation with either treesitter or the cpp treesitter parser
-  ;; to capture range of sibling nodes. See catch2.build_position for workaround using
-  ;; @test.statement and @test.body to construct @test.definition
-  ((namespace_definition
-    name: (namespace_identifier)
 
-    body: (declaration_list
-      (expression_statement
-        (call_expression
-          function: (identifier) @test.kind (#any-of? @test.kind "TEST_CASE" "TEST_CASE_METHOD" "SCENARIO")
-          arguments: (argument_list
-            . (identifier) ? @test.fixture
-            . (string_literal (string_content) @test.name )
-            . (string_literal (string_content) @test.tag ) ?
-            .
-          )
-        )
-      ) @test.statement
-      . (compound_statement) @test.body)
-  ))
-  ;; query (tests without namespace - anchored to translation_unit to avoid double-matching
-  ;; tests that are also inside a namespace)
-  (translation_unit
-    (expression_statement
-      (call_expression
-        function: (identifier) @test.kind (#any-of? @test.kind "TEST_CASE" "TEST_CASE_METHOD" "SCENARIO")
-        arguments: (argument_list
-          . (identifier) ? @test.fixture
-          . (string_literal (string_content) @test.name )
-          . (string_literal (string_content) @test.tag ) ?
-          .
-        )
-      )
-    ) @test.statement
-    . (compound_statement) @test.body
-  )
 ]]
 
 function catch2.parse_errors(output)
   local capture = string.match(output, "%.%.%.+[\r\n](.-)%=%=%=+")
 
   if not capture then
-    logger.error("Failed to capture catch2 errors")
-    return {}
+    capture = output
   end
 
   local errors = {}

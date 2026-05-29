@@ -4,9 +4,17 @@ local logger = require("neotest.logging")
 ---@type neotest.Adapter
 local adapter = { name = "neotest-ctest" }
 
+local ctest_testcases_by_root = {}
+local filter_unavailable_position_list
+
 adapter.setup = function(user_config)
   config.setup(user_config)
+  ctest_testcases_by_root = {}
   return adapter
+end
+
+function adapter.clear_cache()
+  ctest_testcases_by_root = {}
 end
 
 function adapter.root(dir)
@@ -17,8 +25,132 @@ function adapter.filter_dir(name, rel_path, root)
   return config.filter_dir(name, rel_path, root)
 end
 
+local function ctest_root_for_path(path, position)
+  local cwd = vim.loop.cwd()
+  local root = adapter.root(path) or cwd
+  return config.ctest_root(root, position or { id = path, name = vim.fn.fnamemodify(path, ":t"), path = path, type = "file" }) or root
+end
+
+local function ctest_testcases_for_root(root)
+  if ctest_testcases_by_root[root] then
+    return ctest_testcases_by_root[root]
+  end
+
+  local ok, ctest = pcall(function()
+    return require("neotest-ctest.ctest"):new(root)
+  end)
+  if not ok then
+    logger.warn("neotest-ctest: failed to load CTest tests for discovery: " .. tostring(ctest))
+    ctest_testcases_by_root[root] = {}
+    return ctest_testcases_by_root[root]
+  end
+
+  ctest_testcases_by_root[root] = ctest:testcases()
+  return ctest_testcases_by_root[root]
+end
+
+local function has_available_positions(path)
+  local framework = require("neotest-ctest.framework").detect(path)
+  if not framework then
+    return false
+  end
+
+  local ok, tree = pcall(framework.parse_positions, path)
+  if not ok or not tree then
+    return false
+  end
+
+  local root = ctest_root_for_path(path, tree:data())
+  local testcases = ctest_testcases_for_root(root)
+  return filter_unavailable_position_list(tree:to_list(), testcases) ~= nil
+end
+
 function adapter.is_test_file(file_path)
-  return config.is_test_file(file_path)
+  if not config.is_test_file(file_path) then
+    return false
+  end
+
+  if not config.hide_unavailable_tests then
+    return true
+  end
+
+  return has_available_positions(file_path)
+end
+
+local function has_prefixed_ctest_test(testcases, prefix)
+  local ctest_prefix = prefix .. "/"
+  for name, _ in pairs(testcases) do
+    if vim.startswith(name, ctest_prefix) then
+      return true
+    end
+  end
+  return false
+end
+
+function filter_unavailable_position_list(position_list, testcases, parent_ctest_name, section_path)
+  local position = position_list[1]
+  local filtered = { position }
+
+  local current_ctest_name = parent_ctest_name
+  local current_section_path = section_path
+  local available = true
+
+  if position.type == "test" then
+    if position.section_filter then
+      current_section_path = section_path and (section_path .. "/" .. position.section_filter) or nil
+      available = (current_section_path and testcases[current_section_path])
+        or (parent_ctest_name and testcases[parent_ctest_name])
+        or false
+    else
+      current_ctest_name = position.name
+      current_section_path = position.name
+      available = testcases[position.name] or has_prefixed_ctest_test(testcases, position.name)
+    end
+  end
+
+  for index = 2, #position_list do
+    local child = filter_unavailable_position_list(
+      position_list[index],
+      testcases,
+      current_ctest_name,
+      current_section_path
+    )
+    if child then
+      table.insert(filtered, child)
+    end
+  end
+
+  if position.type == "file" or position.type == "namespace" then
+    if #filtered > 1 then
+      return filtered
+    end
+
+    return nil
+  end
+
+  if available or #filtered > 1 then
+    return filtered
+  end
+
+  return nil
+end
+
+local function filter_unavailable_positions(tree, path)
+  if not config.hide_unavailable_tests then
+    return tree
+  end
+
+  local root = ctest_root_for_path(path, tree:data())
+  local testcases = ctest_testcases_for_root(root)
+  local filtered = filter_unavailable_position_list(tree:to_list(), testcases)
+  if not filtered then
+    return nil
+  end
+
+  local Tree = require("neotest.types").Tree
+  return Tree.from_list(filtered, function(position)
+    return position.id
+  end)
 end
 
 function adapter.discover_positions(path)
@@ -28,7 +160,96 @@ function adapter.discover_positions(path)
     return
   end
 
-  return framework.parse_positions(path)
+  return filter_unavailable_positions(framework.parse_positions(path), path)
+end
+
+local function section_ctest_name(tree_node)
+  local data = tree_node and tree_node:data()
+  if not data or not data.section_filter then
+    return nil
+  end
+
+  local parts = { data.section_filter }
+  local parent = tree_node:parent()
+  while parent do
+    local parent_data = parent:data()
+    if parent_data.type == "test" then
+      if parent_data.section_filter then
+        table.insert(parts, 1, parent_data.section_filter)
+      else
+        table.insert(parts, 1, parent_data.name)
+        return table.concat(parts, "/")
+      end
+    end
+    parent = parent:parent()
+  end
+
+  return nil
+end
+
+local function add_runnable_test(runnable_tests, seen_runnable_tests, testcase)
+  if not testcase then
+    return
+  end
+
+  local key = testcase.index or testcase
+  if seen_runnable_tests[key] then
+    return
+  end
+
+  seen_runnable_tests[key] = true
+  table.insert(runnable_tests, testcase)
+end
+
+local function add_prefixed_ctest_tests(runnable_tests, seen_runnable_tests, testcases, prefix)
+  local ctest_prefix = prefix .. "/"
+  local names = vim.tbl_keys(testcases)
+  table.sort(names)
+  for _, name in ipairs(names) do
+    local testcase = testcases[name]
+    if vim.startswith(name, ctest_prefix) then
+      add_runnable_test(runnable_tests, seen_runnable_tests, testcase)
+    end
+  end
+end
+
+local function collect_runnable_tests(tree, testcases)
+  local runnable_tests = {}
+  local seen_runnable_tests = {}
+  local section_to_ctest = {}
+
+  for _, node in tree:iter() do
+    if node.type == "test" then
+      if testcases[node.name] then
+        -- Top-level TEST_CASE / TEST_CASE_METHOD / SCENARIO known to CTest
+        add_runnable_test(runnable_tests, seen_runnable_tests, testcases[node.name])
+      elseif not node.section_filter then
+        add_prefixed_ctest_tests(runnable_tests, seen_runnable_tests, testcases, node.name)
+      else
+        local tree_node = tree:get_key(node.id)
+        local ctest_section_name = section_ctest_name(tree_node)
+        if ctest_section_name and testcases[ctest_section_name] then
+          add_runnable_test(runnable_tests, seen_runnable_tests, testcases[ctest_section_name])
+          section_to_ctest[node.id] = ctest_section_name
+        end
+
+        -- SECTION node: not directly known to CTest.
+        -- Find the nearest ancestor TEST_CASE and record the mapping.
+        local ancestor = tree_node and tree_node:parent()
+        while ancestor do
+          local adata = ancestor:data()
+          if adata.type == "test" and testcases[adata.name] then
+            section_to_ctest[node.id] = adata.name
+            add_runnable_test(runnable_tests, seen_runnable_tests, testcases[adata.name])
+            break
+          end
+          ancestor = ancestor:parent()
+        end
+      end
+    end
+  end
+
+  return runnable_tests, section_to_ctest
 end
 
 ---@param args neotest.RunArgs
@@ -46,7 +267,9 @@ function adapter.build_spec(args)
 
   local cwd = vim.loop.cwd()
   local root = adapter.root(position.path) or cwd
-  local ctest = require("neotest-ctest.ctest"):new(root)
+  root = config.ctest_root(root, position) or root
+  local ctest_module = require("neotest-ctest.ctest")
+  local ctest = ctest_module:new(root)
 
   local framework = require("neotest-ctest.framework").detect(position.path)
   if not framework then
@@ -56,36 +279,32 @@ function adapter.build_spec(args)
 
   -- Collect runnable tests (known to CTest)
   local testcases = ctest:testcases()
-  local runnable_tests = {}
-  -- Maps section node id -> CTest test name (for sections nested inside a TEST_CASE)
-  local section_to_ctest = {}
+  local runnable_tests, section_to_ctest = collect_runnable_tests(tree, testcases)
+
+  if #runnable_tests == 0 then
+    for _, test_dir in ipairs(ctest_module:test_dirs(root)) do
+      if test_dir ~= ctest._test_dir then
+        local candidate = ctest_module:new(root, test_dir)
+        local candidate_testcases = candidate:testcases()
+        local candidate_runnable_tests, candidate_section_to_ctest =
+          collect_runnable_tests(tree, candidate_testcases)
+        if #candidate_runnable_tests > 0 then
+          ctest = candidate
+          testcases = candidate_testcases
+          runnable_tests = candidate_runnable_tests
+          section_to_ctest = candidate_section_to_ctest
+          break
+        end
+      end
+    end
+  end
+
   -- Catch2 -c section filter chain (only set when running a single SECTION node)
   local section_args = {}
   -- Full Catch2 JUnit lookup key for a directly-run SECTION, e.g. "TestCase/Outer/Inner".
   -- Catch2 JUnit uses "TestCase/Section" as the <testcase name> attribute when sections
   -- are involved, so we can't look up results by just the CTest test name.
   local section_junit_key = nil
-
-  for _, node in tree:iter() do
-    if node.type == "test" then
-      if testcases[node.name] then
-        -- Top-level TEST_CASE / TEST_CASE_METHOD / SCENARIO known to CTest
-        table.insert(runnable_tests, testcases[node.name])
-      else
-        -- SECTION node: not directly known to CTest.
-        -- Find the nearest ancestor TEST_CASE and record the mapping.
-        local ancestor = tree:get_key(node.id):parent()
-        while ancestor do
-          local adata = ancestor:data()
-          if adata.type == "test" and testcases[adata.name] then
-            section_to_ctest[node.id] = adata.name
-            break
-          end
-          ancestor = ancestor:parent()
-        end
-      end
-    end
-  end
 
   -- When running a single SECTION node, build the Catch2 -c filter chain.
   -- args.tree is a subtree rooted at the selected SECTION, so :parent() is not
@@ -122,6 +341,19 @@ function adapter.build_spec(args)
           break
         end
         parent_node = parent_node:parent()
+      end
+    end
+
+    if not ctest_ancestor then
+      for _, node in full_tree:iter() do
+        if node.type == "test" and testcases[node.name] and node.path == position.path and node.range and node.range[1] <= position.range[1] then
+          if not ctest_ancestor or node.range[1] > ctest_ancestor.range[1] then
+            ctest_ancestor = node
+          end
+        end
+      end
+      if ctest_ancestor then
+        logger.debug("neotest-ctest: SECTION — found CTest ancestor via preceding test fallback: " .. ctest_ancestor.name)
       end
     end
 
@@ -289,6 +521,31 @@ function adapter.build_spec(args)
   }
 end
 
+local function single_testcase(testsuite)
+  local only = nil
+  for name, testcase in pairs(testsuite) do
+    if name ~= "summary" then
+      if only then
+        return nil
+      end
+      only = testcase
+    end
+  end
+  return only
+end
+
+local function is_passed_status(status)
+  return status == "run" or status == "passed" or status == "pass"
+end
+
+local function is_failed_status(status)
+  return status == "fail" or status == "failed" or status == "failure"
+end
+
+local function is_skipped_status(status)
+  return status == "skipped" or status == "disabled" or status == "notrun"
+end
+
 local function prepare_results(tree, testsuite, framework, context)
   local node = tree:data()
   local results = {}
@@ -296,6 +553,7 @@ local function prepare_results(tree, testsuite, framework, context)
   if node.type == "file" or node.type == "namespace" then
     local passed = 0
     local failed = 0
+    local skipped = 0
     for _, child in pairs(tree:children()) do
       local r = prepare_results(child, testsuite, framework, context)
       for n, v in pairs(r) do
@@ -304,12 +562,16 @@ local function prepare_results(tree, testsuite, framework, context)
           passed = passed + 1
         elseif v.status == "failed" then
           failed = failed + 1
+        elseif v.status == "skipped" then
+          skipped = skipped + 1
         end
       end
     end
 
-    local status = failed > 0 and "failed" or passed > 0 and "passed" or "skipped"
-    results[node.id] = { status = status, output = testsuite.summary.output }
+    local status = failed > 0 and "failed" or passed > 0 and "passed" or skipped > 0 and "skipped" or nil
+    if status then
+      results[node.id] = { status = status, output = testsuite.summary.output }
+    end
   elseif node.type == "test" then
     -- For SECTION nodes (Catch2), fall back to the parent CTest test result.
     -- When running directly (catch2_direct), Catch2 JUnit uses "TestCase/Section" as the
@@ -324,28 +586,33 @@ local function prepare_results(tree, testsuite, framework, context)
         local parent_name = context.section_to_ctest[node.id]
         if parent_name then
           testcase = testsuite[parent_name]
+          if not testcase and context.root_testcase then
+            testcase = context.root_testcase
+          end
           using_section_fallback = true
         end
+      end
+      if not testcase and context.root_id == node.id then
+        testcase = context.root_testcase
       end
     end
 
     if not testcase then
-      logger.warn(string.format("Unknown CTest testcase '%s' (marked as skipped)", node.name))
-      results[node.id] = { status = "skipped" }
+      logger.warn(string.format("Unknown CTest testcase '%s' (leaving previous status unchanged)", node.name))
     else
-      if testcase.status == "run" then
+      if is_passed_status(testcase.status) then
         results[node.id] = {
           status = "passed",
           short = ("Passed in %.6f seconds"):format(testcase.time),
           output = testsuite.summary.output,
         }
-      elseif testcase.status == "fail" then
+      elseif is_failed_status(testcase.status) then
         local errors = framework.parse_errors(testcase.output)
 
         if using_section_fallback then
-          -- When inheriting from the parent CTest result, only mark this SECTION as failed
-          -- if at least one error's line falls within its source range. This prevents all
-          -- sibling SECTIONs from being marked failed when only one actually failed.
+          -- When inheriting from the parent CTest result, mark only SECTIONs with
+          -- matching error lines as failed. Sibling SECTIONs with no matching errors
+          -- did run successfully, so report them as passed instead of skipped.
           local section_errors = {}
           for _, error in ipairs(errors) do
             local adjusted_line = error.line - 1 -- convert to 0-indexed (neotest adds 1)
@@ -360,8 +627,12 @@ local function prepare_results(tree, testsuite, framework, context)
               output = testsuite.summary.output,
               errors = section_errors,
             }
-          else
-            results[node.id] = { status = "skipped" }
+          elseif #errors > 0 then
+            results[node.id] = {
+              status = "passed",
+              short = ("Passed in %.6f seconds"):format(testcase.time),
+              output = testsuite.summary.output,
+            }
           end
         else
           -- NOTE: Neotest adds 1 for some reason.
@@ -376,7 +647,9 @@ local function prepare_results(tree, testsuite, framework, context)
           }
         end
       else
-        results[node.id] = { status = "skipped" }
+        if is_skipped_status(testcase.status) and not using_section_fallback then
+          results[node.id] = { status = "skipped" }
+        end
       end
     end
 
@@ -393,13 +666,64 @@ local function prepare_results(tree, testsuite, framework, context)
   return results
 end
 
-local function worst_status(a, b)
-  if a == "failed" or b == "failed" then
-    return "failed"
-  elseif a == "passed" or b == "passed" then
-    return "passed"
+local function aggregate_parent_status(results)
+  local has_skipped = false
+  local status = nil
+  for _, v in pairs(results) do
+    if v.status == "failed" then
+      return "failed"
+    elseif v.status == "passed" then
+      status = "passed"
+    elseif v.status == "skipped" then
+      has_skipped = true
+    end
   end
-  return "skipped"
+
+  -- A run that only produced skipped leaf results must not overwrite the
+  -- previous result of the enclosing file/namespace. Otherwise a single skipped
+  -- Catch2/CTest case makes the complete branch look skipped in neotest.
+  if status then
+    return status
+  elseif has_skipped then
+    return nil
+  end
+
+  return nil
+end
+
+local function add_descendant_section_results(results, root_node, framework, status, testsuite)
+  if root_node.type ~= "test" or root_node.section_filter or status ~= "passed" then
+    return
+  end
+
+  local has_children = false
+  local ok, full_tree = pcall(framework.parse_positions, root_node.path)
+  if not ok or not full_tree then
+    return
+  end
+
+  for _, node in full_tree:iter() do
+    if
+      node.id ~= root_node.id
+      and node.type == "test"
+      and node.section_filter
+      and node.path == root_node.path
+      and node.range
+      and root_node.range
+      and root_node.range[1] <= node.range[1]
+      and node.range[3] <= root_node.range[3]
+    then
+      has_children = true
+      results[node.id] = {
+        status = "passed",
+        output = testsuite.summary.output,
+      }
+    end
+  end
+
+  if has_children and results[root_node.id] then
+    results[root_node.id].status = status
+  end
 end
 
 function adapter.results(spec, _, tree)
@@ -407,7 +731,14 @@ function adapter.results(spec, _, tree)
   local testsuite = context.catch2_direct
     and context.ctest:parse_catch2_direct_results()
     or context.ctest:parse_test_results()
+  context.root_id = tree:data().id
+  context.root_testcase = single_testcase(testsuite)
+
   local results = prepare_results(tree, testsuite, context.framework, context)
+  local root_result = results[context.root_id]
+  if root_result then
+    add_descendant_section_results(results, tree:data(), context.framework, root_result.status, testsuite)
+  end
 
   -- When running a single test, prepare_results only covers the subtree rooted at
   -- that test node. Neotest's runner propagates results only within the subtree, so
@@ -415,15 +746,12 @@ function adapter.results(spec, _, tree)
   -- parent stays "failed" after a test is fixed and re-runs as "passed").
   -- Fix: compute the worst status across all results from this run and walk up
   -- tree:parent() to set an explicit result for each ancestor not already covered.
-  local status = "skipped"
-  for _, v in pairs(results) do
-    status = worst_status(status, v.status)
-  end
+  local status = aggregate_parent_status(results)
 
   local parent = tree:parent()
   while parent do
     local pdata = parent:data()
-    if (pdata.type == "file" or pdata.type == "namespace") and not results[pdata.id] then
+    if status and (pdata.type == "file" or pdata.type == "namespace") and not results[pdata.id] then
       results[pdata.id] = { status = status, output = testsuite.summary.output }
     end
     parent = parent:parent()

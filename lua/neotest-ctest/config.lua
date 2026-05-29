@@ -46,11 +46,15 @@ end
 
 local default_config = {
   root = default_root,
+  ctest_root = function(root, _)
+    return root
+  end,
   is_test_file = default_is_test_file,
   filter_dir = default_filter_dir,
   frameworks = { "gtest", "catch2", "doctest", "cpputest" },
   cmd = { "ctest" },
   extra_args = {},
+  hide_unavailable_tests = false,
   -- DAP adapter name to use for debugging (e.g. "codelldb", "cppdbg").
   -- Set to nil to disable debug support.
   dap_adapter = nil,
