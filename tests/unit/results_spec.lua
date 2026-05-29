@@ -9,6 +9,7 @@ describe("position.type == test", function()
   local spec, test_file, positions, tree
 
   before_each(function()
+    adapter.clear_cache()
     test_file = "TEST_test.cpp"
     positions = {
       {
@@ -114,6 +115,7 @@ describe("position.type == namespace", function()
   local spec, test_file, namespace, positions, tree
 
   before_each(function()
+    adapter.clear_cache()
     test_file = "TEST_test.cpp"
     namespace = "namespace"
     positions = {
@@ -245,6 +247,7 @@ describe("position.type == test with nested SECTION children (Catch2)", function
   local spec, test_file, positions, tree
 
   before_each(function()
+    adapter.clear_cache()
     test_file = "TEST_CASE_SECTION_test.cpp"
     -- Tree: TEST_CASE "With sections" -> SECTION "First section", SECTION "Second section"
     positions = {
@@ -483,12 +486,68 @@ describe("position.type == test with nested SECTION children (Catch2)", function
     local results = adapter.results(section_spec, nil, section_tree)
     assert.equals("failed", results[s1_id].status)
   end)
+
+  it("selected SECTION marks TEST_CASE ancestors as passed via catch2_direct path", function()
+    local tc_id = test_file .. "::" .. "With sections"
+    local s1_id = test_file .. "::" .. "With sections" .. "::" .. "First section"
+    local section_tree = Tree.from_list(
+      {
+        {
+          id = tc_id,
+          name = "With sections",
+          path = test_file,
+          range = { 4, 0, 11, 1 },
+          type = "test",
+        },
+        {
+          {
+            id = s1_id,
+            name = "First section",
+            path = test_file,
+            range = { 5, 2, 7, 3 },
+            type = "test",
+            section_filter = "First section",
+          },
+        },
+      },
+      function(pos)
+        return pos.id
+      end
+    )
+    local junit_key = "With sections/First section"
+    local section_spec = {
+      context = {
+        catch2_direct = true,
+        section_junit_key = junit_key,
+        ctest = {
+          parse_catch2_direct_results = function()
+            return {
+              [junit_key] = { status = "run", time = 0.05, output = "" },
+              summary = { tests = 1, failures = 0, skipped = 0, time = 0.05, output = "" },
+            }
+          end,
+        },
+        framework = {
+          parse_errors = function(_)
+            return {}
+          end,
+        },
+        section_to_ctest = { [s1_id] = "With sections" },
+      },
+    }
+
+    local results = adapter.results(section_spec, nil, section_tree:get_key(s1_id))
+
+    assert.equals("passed", results[s1_id].status)
+    assert.equals("passed", results[tc_id].status)
+  end)
 end)
 
 describe("position.type == file", function()
   local spec, test_file, positions, tree, namespace
 
   before_each(function()
+    adapter.clear_cache()
     test_file = "TEST_test.cpp"
     namespace = "namespace"
     positions = {
@@ -669,6 +728,169 @@ describe("position.type == file", function()
     assert.equals("skipped", results[test_id].status)
     assert.is_nil(results[test_file .. "::" .. namespace])
     assert.is_nil(results[test_file])
+  end)
+
+  it("adapter.results should mark all ancestors as passed when a selected test passes", function()
+    spec.context.ctest.parse_test_results = function()
+      return {
+        ["Suite.First"] = {
+          status = "run",
+          time = 0,
+          output = "",
+        },
+        summary = {
+          tests = 1,
+          failures = 0,
+          skipped = 0,
+          time = 0,
+          output = "",
+        },
+      }
+    end
+
+    local dir_id = "tests"
+    local nested_tree = Tree.from_list({
+      {
+        id = dir_id,
+        name = "tests",
+        path = "tests",
+        type = "dir",
+      },
+      {
+        {
+          id = test_file,
+          name = test_file,
+          path = test_file,
+          range = { 0, 0, 12, 1 },
+          type = "file",
+        },
+        {
+          {
+            id = test_file .. "::" .. namespace,
+            name = namespace,
+            path = test_file,
+            range = { 2, 0, 7, 1 },
+            type = "namespace",
+          },
+          {
+            {
+              id = test_file .. "::" .. namespace .. "::" .. "Suite.First",
+              name = "Suite.First",
+              path = test_file,
+              range = { 4, 0, 4, 41 },
+              type = "test",
+            },
+          },
+        },
+      },
+    }, function(pos)
+      return pos.id
+    end)
+
+    local test_id = test_file .. "::" .. namespace .. "::" .. "Suite.First"
+    local results = adapter.results(spec, nil, nested_tree:get_key(test_id))
+
+    assert.equals("passed", results[test_id].status)
+    assert.equals("passed", results[test_file .. "::" .. namespace].status)
+    assert.equals("passed", results[test_file].status)
+    assert.equals("passed", results[dir_id].status)
+  end)
+
+  it("adapter.results should keep ancestors failed while a sibling still has a failed result", function()
+    local dir_id = "tests"
+    local nested_tree = Tree.from_list({
+      {
+        id = dir_id,
+        name = "tests",
+        path = "tests",
+        type = "dir",
+      },
+      {
+        {
+          id = test_file,
+          name = test_file,
+          path = test_file,
+          range = { 0, 0, 12, 1 },
+          type = "file",
+        },
+        {
+          {
+            id = test_file .. "::" .. namespace,
+            name = namespace,
+            path = test_file,
+            range = { 2, 0, 7, 1 },
+            type = "namespace",
+          },
+          {
+            {
+              id = test_file .. "::" .. namespace .. "::" .. "Suite.First",
+              name = "Suite.First",
+              path = test_file,
+              range = { 4, 0, 4, 41 },
+              type = "test",
+            },
+          },
+          {
+            {
+              id = test_file .. "::" .. namespace .. "::" .. "Suite.Second",
+              name = "Suite.Second",
+              path = test_file,
+              range = { 5, 0, 5, 41 },
+              type = "test",
+            },
+          },
+        },
+      },
+    }, function(pos)
+      return pos.id
+    end)
+
+    local namespace_id = test_file .. "::" .. namespace
+    local first_id = namespace_id .. "::" .. "Suite.First"
+    local second_id = namespace_id .. "::" .. "Suite.Second"
+
+    spec.context.ctest.parse_test_results = function()
+      return {
+        ["Suite.First"] = { status = "fail", time = 0, output = "" },
+        ["Suite.Second"] = { status = "fail", time = 0, output = "" },
+        summary = { tests = 2, failures = 2, skipped = 0, time = 0, output = "" },
+      }
+    end
+
+    local failed_results = adapter.results(spec, nil, nested_tree:get_key(test_file))
+
+    assert.equals("failed", failed_results[first_id].status)
+    assert.equals("failed", failed_results[second_id].status)
+    assert.equals("failed", failed_results[namespace_id].status)
+    assert.equals("failed", failed_results[test_file].status)
+
+    spec.context.ctest.parse_test_results = function()
+      return {
+        ["Suite.First"] = { status = "run", time = 0, output = "" },
+        summary = { tests = 1, failures = 0, skipped = 0, time = 0, output = "" },
+      }
+    end
+
+    local partially_fixed_results = adapter.results(spec, nil, nested_tree:get_key(first_id))
+
+    assert.equals("passed", partially_fixed_results[first_id].status)
+    assert.equals("failed", partially_fixed_results[namespace_id].status)
+    assert.equals("failed", partially_fixed_results[test_file].status)
+    assert.equals("failed", partially_fixed_results[dir_id].status)
+
+    spec.context.ctest.parse_test_results = function()
+      return {
+        ["Suite.Second"] = { status = "run", time = 0, output = "" },
+        summary = { tests = 1, failures = 0, skipped = 0, time = 0, output = "" },
+      }
+    end
+
+    local fully_fixed_results = adapter.results(spec, nil, nested_tree:get_key(second_id))
+
+    assert.equals("passed", fully_fixed_results[second_id].status)
+    assert.equals("passed", fully_fixed_results[namespace_id].status)
+    assert.equals("passed", fully_fixed_results[test_file].status)
+    assert.equals("passed", fully_fixed_results[dir_id].status)
   end)
 
   describe("contains a namespace with passing tests and a failing non-namespaced test", function()

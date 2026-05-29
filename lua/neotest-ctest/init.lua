@@ -5,16 +5,19 @@ local logger = require("neotest.logging")
 local adapter = { name = "neotest-ctest" }
 
 local ctest_testcases_by_root = {}
+local test_results_by_id = {}
 local filter_unavailable_position_list
 
 adapter.setup = function(user_config)
   config.setup(user_config)
   ctest_testcases_by_root = {}
+  test_results_by_id = {}
   return adapter
 end
 
 function adapter.clear_cache()
   ctest_testcases_by_root = {}
+  test_results_by_id = {}
 end
 
 function adapter.root(dir)
@@ -691,6 +694,57 @@ local function aggregate_parent_status(results)
   return nil
 end
 
+local function result_status(result)
+  return result and result.status or nil
+end
+
+local function aggregate_known_statuses(statuses)
+  local has_passed = false
+  local has_skipped = false
+  for _, status in ipairs(statuses) do
+    if status == "failed" then
+      return "failed"
+    elseif status == "passed" then
+      has_passed = true
+    elseif status == "skipped" then
+      has_skipped = true
+    end
+  end
+
+  if has_passed then
+    return "passed"
+  elseif has_skipped then
+    return nil
+  end
+
+  return nil
+end
+
+local function aggregate_cached_subtree_status(tree, visited)
+  local node = tree:data()
+  visited = visited or {}
+  if visited[node.id] then
+    return nil
+  end
+  visited[node.id] = true
+
+  local child_statuses = {}
+
+  for _, child in pairs(tree:children()) do
+    local status = aggregate_cached_subtree_status(child, visited)
+    if status then
+      table.insert(child_statuses, status)
+    end
+  end
+
+  local child_status = aggregate_known_statuses(child_statuses)
+  if child_status then
+    return child_status
+  end
+
+  return result_status(test_results_by_id[node.id])
+end
+
 local function add_descendant_section_results(results, root_node, framework, status, testsuite)
   if root_node.type ~= "test" or root_node.section_filter or status ~= "passed" then
     return
@@ -740,19 +794,27 @@ function adapter.results(spec, _, tree)
     add_descendant_section_results(results, tree:data(), context.framework, root_result.status, testsuite)
   end
 
+  for id, result in pairs(results) do
+    test_results_by_id[id] = result
+  end
+
   -- When running a single test, prepare_results only covers the subtree rooted at
   -- that test node. Neotest's runner propagates results only within the subtree, so
-  -- ancestor nodes (namespace, file) keep stale results from previous runs (e.g.
-  -- parent stays "failed" after a test is fixed and re-runs as "passed").
-  -- Fix: compute the worst status across all results from this run and walk up
-  -- tree:parent() to set an explicit result for each ancestor not already covered.
+  -- ancestor nodes keep stale results from previous runs (e.g. parent stays
+  -- "failed" after a test is fixed and re-runs as "passed").
+  -- Fix: walk up tree:parent() and recompute each ancestor from current results
+  -- plus the last known sibling results.
   local status = aggregate_parent_status(results)
 
   local parent = tree:parent()
   while parent do
     local pdata = parent:data()
-    if status and (pdata.type == "file" or pdata.type == "namespace") and not results[pdata.id] then
-      results[pdata.id] = { status = status, output = testsuite.summary.output }
+    if status and pdata.id and not results[pdata.id] then
+      local parent_status = aggregate_cached_subtree_status(parent)
+      if parent_status then
+        results[pdata.id] = { status = parent_status, output = testsuite.summary.output }
+        test_results_by_id[pdata.id] = results[pdata.id]
+      end
     end
     parent = parent:parent()
   end
