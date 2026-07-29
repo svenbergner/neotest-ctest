@@ -82,7 +82,12 @@ end
 function cpputest.parse_positions(path)
   local lib = require("neotest.lib")
   local opts = { build_position = "require('neotest-ctest.framework.cpputest').build_position" }
-  return lib.treesitter.parse_positions(path, cpputest.tests_query, opts)
+  -- NOTE: Bypass `lib.treesitter.parse_positions` (subprocess-based parsing) and parse
+  -- synchronously in-process instead. The subprocess RPC mechanism has been observed to
+  -- hang indefinitely (upstream neotest bug) once the child<->parent channel breaks,
+  -- causing discovery to stall forever with no timeout/recovery.
+  local content = lib.files.read(path)
+  return lib.treesitter.parse_positions_from_string(path, content, cpputest.tests_query, opts)
 end
 
 return cpputest

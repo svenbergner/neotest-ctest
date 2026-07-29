@@ -11,6 +11,16 @@ function ctest:run(args)
   local stderr = ""
   local code = 0
 
+  logger.debug(
+    "neotest-ctest: run() start [nio_task="
+      .. tostring(nio.current_task() ~= nil)
+      .. ", fast_event="
+      .. tostring(vim.in_fast_event())
+      .. "]: "
+      .. table.concat(cmd, " ")
+  )
+  local start_time = vim.loop.hrtime()
+
   if nio.current_task() then
     local result
     code, result = lib.process.run(cmd, { stdout = true, stderr = true })
@@ -28,12 +38,23 @@ function ctest:run(args)
     code = vim.v.shell_error
   end
 
+  local elapsed_ms = (vim.loop.hrtime() - start_time) / 1e6
+  logger.debug(
+    "neotest-ctest: run() finished in "
+      .. string.format("%.2f", elapsed_ms)
+      .. "ms, code="
+      .. tostring(code)
+      .. ": "
+      .. table.concat(cmd, " ")
+  )
+
   if code ~= 0 then
     logger.warn(
       "neotest-ctest: ctest command failed with code "
         .. tostring(code)
         .. ": "
         .. table.concat(cmd, " ")
+        .. (stderr ~= "" and (" stderr: " .. stderr) or "")
     )
   end
 

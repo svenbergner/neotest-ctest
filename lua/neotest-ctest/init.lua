@@ -5,18 +5,21 @@ local logger = require("neotest.logging")
 local adapter = { name = "neotest-ctest" }
 
 local ctest_testcases_by_root = {}
+local ctest_session_by_root = {}
 local test_results_by_id = {}
 local filter_unavailable_position_list
 
 adapter.setup = function(user_config)
   config.setup(user_config)
   ctest_testcases_by_root = {}
+  ctest_session_by_root = {}
   test_results_by_id = {}
   return adapter
 end
 
 function adapter.clear_cache()
   ctest_testcases_by_root = {}
+  ctest_session_by_root = {}
   test_results_by_id = {}
 end
 
@@ -39,13 +42,21 @@ local function ctest_testcases_for_root(root)
     return ctest_testcases_by_root[root]
   end
 
-  local ok, ctest = pcall(function()
-    return require("neotest-ctest.ctest"):new(root)
-  end)
-  if not ok then
-    logger.warn("neotest-ctest: failed to load CTest tests for discovery: " .. tostring(ctest))
-    ctest_testcases_by_root[root] = {}
-    return ctest_testcases_by_root[root]
+  -- Reuse a cached CTest session for this root (if any) to avoid re-running
+  -- `ctest --version` on every call (e.g. once per file during discovery when
+  -- `hide_unavailable_tests` is enabled).
+  local ctest = ctest_session_by_root[root]
+  if not ctest then
+    local ok, created = pcall(function()
+      return require("neotest-ctest.ctest"):new(root)
+    end)
+    if not ok then
+      logger.warn("neotest-ctest: failed to load CTest tests for discovery: " .. tostring(created))
+      ctest_testcases_by_root[root] = {}
+      return ctest_testcases_by_root[root]
+    end
+    ctest = created
+    ctest_session_by_root[root] = ctest
   end
 
   ctest_testcases_by_root[root] = ctest:testcases()
@@ -53,19 +64,36 @@ local function ctest_testcases_for_root(root)
 end
 
 local function has_available_positions(path)
+  logger.debug("neotest-ctest: has_available_positions() start: " .. path)
+  local start_time = vim.loop.hrtime()
+
   local framework = require("neotest-ctest.framework").detect(path)
   if not framework then
+    logger.debug("neotest-ctest: has_available_positions() no framework detected: " .. path)
     return false
   end
 
   local ok, tree = pcall(framework.parse_positions, path)
   if not ok or not tree then
+    logger.debug("neotest-ctest: has_available_positions() failed to parse positions: " .. path)
     return false
   end
 
   local root = ctest_root_for_path(path, tree:data())
   local testcases = ctest_testcases_for_root(root)
-  return filter_unavailable_position_list(tree:to_list(), testcases) ~= nil
+  local result = filter_unavailable_position_list(tree:to_list(), testcases) ~= nil
+
+  local elapsed_ms = (vim.loop.hrtime() - start_time) / 1e6
+  logger.debug(
+    "neotest-ctest: has_available_positions() finished in "
+      .. string.format("%.2f", elapsed_ms)
+      .. "ms, result="
+      .. tostring(result)
+      .. ": "
+      .. path
+  )
+
+  return result
 end
 
 function adapter.is_test_file(file_path)
@@ -157,13 +185,52 @@ local function filter_unavailable_positions(tree, path)
 end
 
 function adapter.discover_positions(path)
+  logger.debug("neotest-ctest: discover_positions() start: " .. path)
+  local start_time = vim.loop.hrtime()
+
   local framework = require("neotest-ctest.framework").detect(path)
   if not framework then
     logger.error("Failed to detect test framework for file: " .. path)
     return
   end
 
-  return filter_unavailable_positions(framework.parse_positions(path), path)
+  local detect_elapsed_ms = (vim.loop.hrtime() - start_time) / 1e6
+  logger.debug(
+    "neotest-ctest: discover_positions() framework detected in "
+      .. string.format("%.2f", detect_elapsed_ms)
+      .. "ms: "
+      .. path
+  )
+
+  local parse_start_time = vim.loop.hrtime()
+  local tree = framework.parse_positions(path)
+  local parse_elapsed_ms = (vim.loop.hrtime() - parse_start_time) / 1e6
+  logger.debug(
+    "neotest-ctest: discover_positions() parse_positions() finished in "
+      .. string.format("%.2f", parse_elapsed_ms)
+      .. "ms: "
+      .. path
+  )
+
+  local filter_start_time = vim.loop.hrtime()
+  local result = filter_unavailable_positions(tree, path)
+  local filter_elapsed_ms = (vim.loop.hrtime() - filter_start_time) / 1e6
+  logger.debug(
+    "neotest-ctest: discover_positions() filter_unavailable_positions() finished in "
+      .. string.format("%.2f", filter_elapsed_ms)
+      .. "ms: "
+      .. path
+  )
+
+  local total_elapsed_ms = (vim.loop.hrtime() - start_time) / 1e6
+  logger.debug(
+    "neotest-ctest: discover_positions() finished in "
+      .. string.format("%.2f", total_elapsed_ms)
+      .. "ms: "
+      .. path
+  )
+
+  return result
 end
 
 local function section_ctest_name(tree_node)

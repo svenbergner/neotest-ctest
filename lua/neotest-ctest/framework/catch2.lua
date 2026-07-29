@@ -136,7 +136,12 @@ function catch2.parse_positions(path)
     -- Allow SECTION blocks (type="test") to be nested inside TEST_CASE (type="test")
     nested_tests = true,
   }
-  return lib.treesitter.parse_positions(path, catch2.tests_query, opts)
+  -- NOTE: Bypass `lib.treesitter.parse_positions` (subprocess-based parsing) and parse
+  -- synchronously in-process instead. The subprocess RPC mechanism has been observed to
+  -- hang indefinitely (upstream neotest bug) once the child<->parent channel breaks,
+  -- causing discovery to stall forever with no timeout/recovery.
+  local content = lib.files.read(path)
+  return lib.treesitter.parse_positions_from_string(path, content, catch2.tests_query, opts)
 end
 
 return catch2
